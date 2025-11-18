@@ -11,11 +11,11 @@ from schemas import (
     User, Role, Customer, Vendor, Vehicle, Part, Technician,
     JobCard, PartsRequest, VehiclePurchase,
     Quotation, QuotationItem, Invoice,
-    InventoryMovement, Account, JournalEntry, JournalEntryLine
+    InventoryMovement, Account, JournalEntry, JournalEntryLine, Payment
 )
 from bson import ObjectId
 
-app = FastAPI(title="Auto DMS Backend", version="0.1.0")
+app = FastAPI(title="Auto DMS Backend", version="0.1.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -245,6 +245,20 @@ def create_jobcard(j: JobCard):
         raise HTTPException(status_code=404, detail="Vehicle not found")
     if not db.customer.find_one({"_id": oid(j.customer_id)}):
         raise HTTPException(status_code=404, detail="Customer not found")
+
+    # Capacity checks for technicians (open/wip jobs)
+    for tech_id in j.technician_ids:
+        tech = db.technician.find_one({"_id": oid(tech_id)})
+        if not tech:
+            raise HTTPException(status_code=404, detail=f"Technician not found: {tech_id}")
+        cap = int(tech.get("capacity", 3))
+        open_jobs = db.jobcard.count_documents({
+            "status": {"$in": ["open", "in_progress", "waiting_parts"]},
+            "technician_ids": {"$in": [tech_id]}
+        })
+        if open_jobs >= cap:
+            raise HTTPException(status_code=409, detail=f"Technician at capacity: {tech.get('name', tech_id)}")
+
     _id = create_document("jobcard", j)
     # Mark vehicle in_service
     db.vehicle.update_one({"_id": oid(j.vehicle_id)}, {"$set": {"status": "in_service"}})
@@ -262,6 +276,11 @@ class JobStatus(BaseModel):
     status: str
 
 
+class AssignTechnicians(BaseModel):
+    technician_ids: List[str]
+    primary_technician_id: Optional[str] = None
+
+
 @app.post("/api/jobcards/{job_id}/status")
 def set_jobcard_status(job_id: str, s: JobStatus):
     res = db.jobcard.update_one({"_id": oid(job_id)}, {"$set": {"status": s.status}})
@@ -270,13 +289,26 @@ def set_jobcard_status(job_id: str, s: JobStatus):
     return {"success": True}
 
 
-class AssignTechnicians(BaseModel):
-    technician_ids: List[str]
-
-
 @app.post("/api/jobcards/{job_id}/assign")
 def assign_technicians(job_id: str, body: AssignTechnicians):
-    res = db.jobcard.update_one({"_id": oid(job_id)}, {"$set": {"technician_ids": body.technician_ids}})
+    # Capacity checks
+    for tech_id in body.technician_ids:
+        tech = db.technician.find_one({"_id": oid(tech_id)})
+        if not tech:
+            raise HTTPException(status_code=404, detail=f"Technician not found: {tech_id}")
+        cap = int(tech.get("capacity", 3))
+        open_jobs = db.jobcard.count_documents({
+            "_id": {"$ne": oid(job_id)},
+            "status": {"$in": ["open", "in_progress", "waiting_parts"]},
+            "technician_ids": {"$in": [tech_id]}
+        })
+        if open_jobs >= cap:
+            raise HTTPException(status_code=409, detail=f"Technician at capacity: {tech.get('name', tech_id)}")
+
+    update = {"technician_ids": body.technician_ids}
+    if body.primary_technician_id:
+        update["primary_technician_id"] = body.primary_technician_id
+    res = db.jobcard.update_one({"_id": oid(job_id)}, {"$set": update})
     if res.matched_count == 0:
         raise HTTPException(status_code=404, detail="Job card not found")
     return {"success": True}
@@ -375,17 +407,21 @@ def create_invoice(inv: Invoice):
 def list_invoices(status: Optional[str] = None):
     filt = {"status": status} if status else {}
     docs = list(db.invoice.find(filt).sort("_id", -1).limit(200))
-    # compute totals
+    # compute totals with per-line rounding
     out = []
     for d in docs:
         subtotal = 0.0
+        vat_total = 0.0
         for it in d.get("items", []):
-            subtotal += float(it.get("unit_price", 0)) * int(it.get("quantity", 1)) - float(it.get("discount", 0))
-        vat = round(subtotal * float(d.get("vat_rate", 0.15)), 2)
-        total = round(subtotal + vat, 2)
+            line_net = round(float(it.get("unit_price", 0)) * int(it.get("quantity", 1)) - float(it.get("discount", 0)), 2)
+            subtotal += line_net
+            vat_total += round(line_net * float(d.get("vat_rate", 0.15)), 2)
+        subtotal = round(subtotal, 2)
+        vat_total = round(vat_total, 2)
+        total = round(subtotal + vat_total, 2)
         dd = with_id(d)
-        dd["subtotal"] = round(subtotal, 2)
-        dd["vat"] = vat
+        dd["subtotal"] = subtotal
+        dd["vat"] = vat_total
         dd["total"] = total
         out.append(dd)
     return out
@@ -393,7 +429,22 @@ def list_invoices(status: Optional[str] = None):
 
 class PayInvoice(BaseModel):
     cashier_id: Optional[str] = None
-    method: Optional[str] = None
+    method: Optional[str] = None  # legacy single method
+    payments: Optional[List[Payment]] = None  # new split payments
+
+
+def _validate_payments(payments: List[Payment], total_due: float):
+    # Require references for certain methods
+    for p in payments:
+        if p.method in ("bank_transfer", "cheque", "account") and not p.reference:
+            raise HTTPException(status_code=400, detail=f"Reference required for {p.method}")
+        if p.amount <= 0:
+            raise HTTPException(status_code=400, detail="Payment amount must be positive")
+    paid_sum = round(sum(p.amount for p in payments), 2)
+    total_due = round(total_due, 2)
+    if paid_sum < total_due:
+        raise HTTPException(status_code=400, detail="Insufficient payment amount")
+    return paid_sum
 
 
 @app.post("/api/invoices/{inv_id}/pay")
@@ -401,6 +452,26 @@ def pay_invoice(inv_id: str, body: PayInvoice):
     inv = db.invoice.find_one({"_id": oid(inv_id)})
     if not inv:
         raise HTTPException(status_code=404, detail="Invoice not found")
+
+    # compute totals with per-line rounding
+    subtotal = 0.0
+    vat_total = 0.0
+    for it in inv.get("items", []):
+        line_net = round(float(it.get("unit_price", 0)) * int(it.get("quantity", 1)) - float(it.get("discount", 0)), 2)
+        subtotal += line_net
+        vat_total += round(line_net * float(inv.get("vat_rate", 0.15)), 2)
+    subtotal = round(subtotal, 2)
+    vat_total = round(vat_total, 2)
+    total_due = round(subtotal + vat_total, 2)
+
+    payments_payload: List[Payment] = []
+    if body.payments and len(body.payments) > 0:
+        payments_payload = body.payments
+    else:
+        # fallback to legacy single method
+        payments_payload = [Payment(method=(body.method or "cash"), amount=total_due)]
+
+    _validate_payments(payments_payload, total_due)
 
     # If parts sale, deduct inventory on payment
     if inv.get("source") == "parts":
@@ -410,7 +481,16 @@ def pay_invoice(inv_id: str, body: PayInvoice):
                 move = InventoryMovement(part_id=it["ref_id"], movement_type="out", quantity=int(it.get("quantity", 1)), reference=inv_id, note="parts sale")
                 create_document("inventorymovement", move)
 
-    res = db.invoice.update_one({"_id": oid(inv_id)}, {"$set": {"status": "paid", "cashier_id": body.cashier_id, "paid_at": datetime.utcnow(), "method": body.method}})
+    res = db.invoice.update_one(
+        {"_id": oid(inv_id)},
+        {"$set": {
+            "status": "paid",
+            "cashier_id": body.cashier_id,
+            "paid_at": datetime.utcnow(),
+            "method": body.method,  # legacy
+            "payments": [p.model_dump() for p in payments_payload],
+        }}
+    )
     if res.matched_count == 0:
         raise HTTPException(status_code=404, detail="Invoice not found")
     return {"success": True}

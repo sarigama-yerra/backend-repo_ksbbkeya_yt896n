@@ -69,6 +69,7 @@ class Technician(BaseModel):
     code: Optional[str] = None
     skills: List[str] = Field(default_factory=list)
     is_available: bool = True
+    capacity: int = 3  # max concurrent open jobs default
 
 # =============== SERVICE ==================
 class LaborItem(BaseModel):
@@ -104,6 +105,7 @@ class JobCard(BaseModel):
     customer_id: str
     advisor_id: Optional[str] = None
     technician_ids: List[str] = Field(default_factory=list)
+    primary_technician_id: Optional[str] = None
     complaint_notes: Optional[str] = None
     check_notes: Optional[str] = None
     labor: List[LaborItem] = Field(default_factory=list)
@@ -134,6 +136,23 @@ class Quotation(BaseModel):
     vat_rate: float = 0.15
     status: Literal["draft", "sent", "accepted", "rejected", "invoiced"] = "draft"
 
+# Payment structures
+PaymentMethod = Literal[
+    "cash",
+    "card",
+    "bank_transfer",
+    "cheque",
+    "account",
+    "voucher",
+    "mobile_wallet",
+]
+
+class Payment(BaseModel):
+    method: PaymentMethod
+    amount: float
+    reference: Optional[str] = None
+    details: Optional[str] = None
+
 class Invoice(BaseModel):
     source: Literal["job_card", "parts", "vehicle", "quotation"]
     source_id: Optional[str] = None
@@ -142,6 +161,10 @@ class Invoice(BaseModel):
     vat_rate: float = 0.15
     status: Literal["pending", "paid", "cancelled"] = "pending"
     cashier_id: Optional[str] = None
+    # Backwards compatible fields
+    method: Optional[str] = None
+    # New structured payments (supports split tenders)
+    payments: List[Payment] = Field(default_factory=list)
 
 # =============== PARTS / INVENTORY ==================
 class InventoryMovement(BaseModel):
@@ -167,4 +190,3 @@ class JournalEntry(BaseModel):
     date: datetime
     lines: List[JournalEntryLine]
     description: Optional[str] = None
-
