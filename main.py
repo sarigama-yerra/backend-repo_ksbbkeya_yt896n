@@ -364,6 +364,13 @@ def jobcard_prepare_invoice(job_id: str):
     return {"invoice_id": inv_id}
 
 
+# NEW: Create invoice (e.g., parts POS)
+@app.post("/api/invoices")
+def create_invoice(inv: Invoice):
+    inv_id = create_document("invoice", inv)
+    return {"id": inv_id}
+
+
 @app.get("/api/invoices")
 def list_invoices(status: Optional[str] = None):
     filt = {"status": status} if status else {}
@@ -391,6 +398,18 @@ class PayInvoice(BaseModel):
 
 @app.post("/api/invoices/{inv_id}/pay")
 def pay_invoice(inv_id: str, body: PayInvoice):
+    inv = db.invoice.find_one({"_id": oid(inv_id)})
+    if not inv:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+
+    # If parts sale, deduct inventory on payment
+    if inv.get("source") == "parts":
+        for it in inv.get("items", []):
+            if it.get("item_type") == "part" and it.get("ref_id"):
+                db.part.update_one({"_id": oid(it["ref_id"])}, {"$inc": {"stock": -int(it.get("quantity", 1))}})
+                move = InventoryMovement(part_id=it["ref_id"], movement_type="out", quantity=int(it.get("quantity", 1)), reference=inv_id, note="parts sale")
+                create_document("inventorymovement", move)
+
     res = db.invoice.update_one({"_id": oid(inv_id)}, {"$set": {"status": "paid", "cashier_id": body.cashier_id, "paid_at": datetime.utcnow(), "method": body.method}})
     if res.matched_count == 0:
         raise HTTPException(status_code=404, detail="Invoice not found")
