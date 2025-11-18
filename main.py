@@ -1,8 +1,21 @@
 import os
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from datetime import datetime
+from typing import List, Optional
 
-app = FastAPI()
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+from database import db, create_document, get_documents
+from schemas import (
+    User, Role, Customer, Vendor, Vehicle, Part, Technician,
+    JobCard, PartsRequest, VehiclePurchase,
+    Quotation, QuotationItem, Invoice,
+    InventoryMovement, Account, JournalEntry, JournalEntryLine
+)
+from bson import ObjectId
+
+app = FastAPI(title="Auto DMS Backend", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -12,17 +25,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --------------------------- Utilities ---------------------------
+
+def oid(id_str: str):
+    try:
+        return ObjectId(id_str)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid ID format")
+
+
+def with_id(doc):
+    if not doc:
+        return doc
+    doc["id"] = str(doc.pop("_id"))
+    return doc
+
+
+# --------------------------- Health ---------------------------
 @app.get("/")
 def read_root():
-    return {"message": "Hello from FastAPI Backend!"}
+    return {"message": "Auto DMS API running"}
 
-@app.get("/api/hello")
-def hello():
-    return {"message": "Hello from the backend API!"}
 
 @app.get("/test")
 def test_database():
-    """Test endpoint to check if database is available and accessible"""
     response = {
         "backend": "✅ Running",
         "database": "❌ Not Available",
@@ -31,38 +57,356 @@ def test_database():
         "connection_status": "Not Connected",
         "collections": []
     }
-    
     try:
-        # Try to import database module
-        from database import db
-        
         if db is not None:
             response["database"] = "✅ Available"
-            response["database_url"] = "✅ Configured"
-            response["database_name"] = db.name if hasattr(db, 'name') else "✅ Connected"
+            response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
+            response["database_name"] = db.name
             response["connection_status"] = "Connected"
-            
-            # Try to list collections to verify connectivity
-            try:
-                collections = db.list_collection_names()
-                response["collections"] = collections[:10]  # Show first 10 collections
-                response["database"] = "✅ Connected & Working"
-            except Exception as e:
-                response["database"] = f"⚠️  Connected but Error: {str(e)[:50]}"
+            response["collections"] = db.list_collection_names()[:20]
         else:
-            response["database"] = "⚠️  Available but not initialized"
-            
-    except ImportError:
-        response["database"] = "❌ Database module not found (run enable-database first)"
+            response["database"] = "❌ Not initialized"
     except Exception as e:
-        response["database"] = f"❌ Error: {str(e)[:50]}"
-    
-    # Check environment variables
-    import os
-    response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
-    response["database_name"] = "✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set"
-    
+        response["database"] = f"❌ Error: {str(e)[:80]}"
     return response
+
+
+# --------------------------- Admin / Users ---------------------------
+class UserCreate(BaseModel):
+    username: str
+    full_name: str
+    password_hash: str
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    roles: List[str] = []
+    locale: str = "en"
+
+
+@app.post("/api/users")
+def create_user(u: UserCreate):
+    user = User(
+        username=u.username,
+        full_name=u.full_name,
+        password_hash=u.password_hash,
+        email=u.email,
+        phone=u.phone,
+        roles=u.roles,
+        locale=u.locale,
+    )
+    _id = create_document("user", user)
+    return {"id": _id}
+
+
+@app.get("/api/users")
+def list_users(q: Optional[str] = None):
+    filt = {}
+    if q:
+        filt = {"$or": [
+            {"username": {"$regex": q, "$options": "i"}},
+            {"full_name": {"$regex": q, "$options": "i"}},
+            {"email": {"$regex": q, "$options": "i"}},
+        ]}
+    users = list(db.user.find(filt).limit(100))
+    return [with_id(u) for u in users]
+
+
+# --------------------------- Master Data ---------------------------
+@app.post("/api/customers")
+def create_customer(c: Customer):
+    _id = create_document("customer", c)
+    return {"id": _id}
+
+
+@app.get("/api/customers")
+def search_customers(q: Optional[str] = None):
+    filt = {}
+    if q:
+        filt = {"$or": [
+            {"name": {"$regex": q, "$options": "i"}},
+            {"phone": {"$regex": q, "$options": "i"}},
+            {"email": {"$regex": q, "$options": "i"}},
+            {"national_id": {"$regex": q, "$options": "i"}},
+        ]}
+    docs = list(db.customer.find(filt).limit(100))
+    return [with_id(d) for d in docs]
+
+
+@app.post("/api/vendors")
+def create_vendor(v: Vendor):
+    _id = create_document("vendor", v)
+    return {"id": _id}
+
+
+@app.get("/api/vendors")
+def list_vendors(q: Optional[str] = None):
+    filt = {"name": {"$regex": q, "$options": "i"}} if q else {}
+    docs = list(db.vendor.find(filt).limit(100))
+    return [with_id(d) for d in docs]
+
+
+# --------------------------- Vehicles ---------------------------
+class VehicleCreate(BaseModel):
+    vin: str
+    make: Optional[str] = None
+    model: Optional[str] = None
+    year: Optional[int] = None
+    color: Optional[str] = None
+    mileage: Optional[int] = None
+    location: Optional[str] = None
+    owner_customer_id: Optional[str] = None
+    purchase_vendor_id: Optional[str] = None
+
+
+@app.post("/api/vehicles")
+def register_vehicle(v: VehicleCreate):
+    existing = db.vehicle.find_one({"vin": v.vin})
+    if existing:
+        raise HTTPException(status_code=409, detail="VIN already registered")
+    vehicle = Vehicle(
+        vin=v.vin, make=v.make, model=v.model, year=v.year, color=v.color,
+        mileage=v.mileage, location=v.location, owner_customer_id=v.owner_customer_id,
+        purchase_vendor_id=v.purchase_vendor_id
+    )
+    _id = create_document("vehicle", vehicle)
+    return {"id": _id}
+
+
+@app.get("/api/vehicles")
+def search_vehicles(q: Optional[str] = None):
+    filt = {}
+    if q:
+        filt = {"$or": [
+            {"vin": {"$regex": q, "$options": "i"}},
+            {"make": {"$regex": q, "$options": "i"}},
+            {"model": {"$regex": q, "$options": "i"}},
+            {"color": {"$regex": q, "$options": "i"}},
+        ]}
+    docs = list(db.vehicle.find(filt).limit(100))
+    return [with_id(d) for d in docs]
+
+
+class VehicleStatusUpdate(BaseModel):
+    status: Optional[str] = None
+    location: Optional[str] = None
+
+
+@app.patch("/api/vehicles/{vehicle_id}")
+def update_vehicle_status(vehicle_id: str, body: VehicleStatusUpdate):
+    update = {k: v for k, v in body.model_dump().items() if v is not None}
+    res = db.vehicle.update_one({"_id": oid(vehicle_id)}, {"$set": update})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Vehicle not found")
+    return {"success": True}
+
+
+# --------------------------- Parts / Inventory ---------------------------
+@app.post("/api/parts")
+def create_part(p: Part):
+    if db.part.find_one({"sku": p.sku}):
+        raise HTTPException(status_code=409, detail="SKU already exists")
+    _id = create_document("part", p)
+    return {"id": _id}
+
+
+@app.get("/api/parts")
+def search_parts(q: Optional[str] = None, sku: Optional[str] = None):
+    filt = {}
+    if sku:
+        filt = {"sku": sku}
+    elif q:
+        filt = {"$or": [
+            {"sku": {"$regex": q, "$options": "i"}},
+            {"name": {"$regex": q, "$options": "i"}},
+        ]}
+    docs = list(db.part.find(filt).limit(100))
+    return [with_id(d) for d in docs]
+
+
+class StockAdjust(BaseModel):
+    quantity: int
+    reason: Optional[str] = None
+
+
+@app.post("/api/parts/{part_id}/adjust")
+def adjust_stock(part_id: str, adj: StockAdjust):
+    res = db.part.update_one({"_id": oid(part_id)}, {"$inc": {"stock": adj.quantity}})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Part not found")
+    move = InventoryMovement(part_id=part_id, movement_type="adjust", quantity=adj.quantity, note=adj.reason)
+    create_document("inventorymovement", move)
+    return {"success": True}
+
+
+# --------------------------- Service: Job Cards & Parts Requests ---------------------------
+@app.post("/api/jobcards")
+def create_jobcard(j: JobCard):
+    # Basic validation
+    if not db.vehicle.find_one({"_id": oid(j.vehicle_id)}):
+        raise HTTPException(status_code=404, detail="Vehicle not found")
+    if not db.customer.find_one({"_id": oid(j.customer_id)}):
+        raise HTTPException(status_code=404, detail="Customer not found")
+    _id = create_document("jobcard", j)
+    # Mark vehicle in_service
+    db.vehicle.update_one({"_id": oid(j.vehicle_id)}, {"$set": {"status": "in_service"}})
+    return {"id": _id}
+
+
+@app.get("/api/jobcards")
+def list_jobcards(status: Optional[str] = None):
+    filt = {"status": status} if status else {}
+    docs = list(db.jobcard.find(filt).sort("_id", -1).limit(100))
+    return [with_id(d) for d in docs]
+
+
+class JobStatus(BaseModel):
+    status: str
+
+
+@app.post("/api/jobcards/{job_id}/status")
+def set_jobcard_status(job_id: str, s: JobStatus):
+    res = db.jobcard.update_one({"_id": oid(job_id)}, {"$set": {"status": s.status}})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Job card not found")
+    return {"success": True}
+
+
+class AssignTechnicians(BaseModel):
+    technician_ids: List[str]
+
+
+@app.post("/api/jobcards/{job_id}/assign")
+def assign_technicians(job_id: str, body: AssignTechnicians):
+    res = db.jobcard.update_one({"_id": oid(job_id)}, {"$set": {"technician_ids": body.technician_ids}})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Job card not found")
+    return {"success": True}
+
+
+@app.post("/api/parts-requests")
+def create_parts_request(req: PartsRequest):
+    if not db.jobcard.find_one({"_id": oid(req.job_card_id)}):
+        raise HTTPException(status_code=404, detail="Job card not found")
+    _id = create_document("partsrequest", req)
+    db.jobcard.update_one({"_id": oid(req.job_card_id)}, {"$set": {"status": "waiting_parts"}})
+    return {"id": _id}
+
+
+class PartsRequestStatus(BaseModel):
+    status: str  # approved, supplied, rejected
+
+
+@app.post("/api/parts-requests/{req_id}/status")
+def update_parts_request(req_id: str, body: PartsRequestStatus):
+    pr = db.partsrequest.find_one({"_id": oid(req_id)})
+    if not pr:
+        raise HTTPException(status_code=404, detail="Parts request not found")
+    db.partsrequest.update_one({"_id": pr["_id"]}, {"$set": {"status": body.status}})
+    if body.status == "supplied":
+        # deduct inventory
+        for item in pr.get("items", []):
+            db.part.update_one({"_id": oid(item["part_id"])}, {"$inc": {"stock": -int(item.get("quantity", 1))}})
+        db.jobcard.update_one({"_id": oid(pr["job_card_id"])}, {"$set": {"status": "in_progress"}})
+    return {"success": True}
+
+
+# --------------------------- Technicians ---------------------------
+@app.post("/api/technicians")
+def create_technician(t: Technician):
+    _id = create_document("technician", t)
+    return {"id": _id}
+
+
+@app.get("/api/technicians")
+def list_technicians(only_available: bool = Query(False)):
+    filt = {"is_available": True} if only_available else {}
+    docs = list(db.technician.find(filt))
+    return [with_id(d) for d in docs]
+
+
+# --------------------------- Sales: Quotations & Invoices ---------------------------
+@app.post("/api/quotations")
+def create_quotation(q: Quotation):
+    _id = create_document("quotation", q)
+    return {"id": _id}
+
+
+@app.post("/api/quotations/{qid}/to-invoice")
+def quotation_to_invoice(qid: str):
+    q = db.quotation.find_one({"_id": oid(qid)})
+    if not q:
+        raise HTTPException(status_code=404, detail="Quotation not found")
+    inv = Invoice(source="quotation", source_id=qid, customer_id=q["customer_id"], items=q["items"], vat_rate=q.get("vat_rate", 0.15))
+    inv_id = create_document("invoice", inv)
+    db.quotation.update_one({"_id": q["_id"]}, {"$set": {"status": "invoiced"}})
+    return {"invoice_id": inv_id}
+
+
+@app.post("/api/jobcards/{job_id}/prepare-invoice")
+def jobcard_prepare_invoice(job_id: str):
+    jc = db.jobcard.find_one({"_id": oid(job_id)})
+    if not jc:
+        raise HTTPException(status_code=404, detail="Job card not found")
+    # build items from job card
+    items: List[dict] = []
+    for l in jc.get("labor", []):
+        amount = float(l.get("flat_hours", 0)) * float(l.get("rate", 0)) - float(l.get("discount", 0))
+        items.append({"item_type": "labor", "description": l.get("description"), "quantity": 1, "unit_price": amount, "discount": 0.0})
+    for p in jc.get("parts", []):
+        amount = float(p.get("price", 0))
+        items.append({"item_type": "part", "ref_id": p.get("part_id"), "description": p.get("name"), "quantity": int(p.get("quantity", 1)), "unit_price": amount, "discount": float(p.get("discount", 0))})
+    for m in jc.get("materials", []):
+        items.append({"item_type": "material", "description": m.get("description"), "quantity": 1, "unit_price": float(m.get("cost", 0)), "discount": 0.0})
+    for o in jc.get("outside", []):
+        items.append({"item_type": "outside", "description": o.get("description"), "quantity": 1, "unit_price": float(o.get("cost", 0)), "discount": 0.0})
+    inv = Invoice(source="job_card", source_id=job_id, customer_id=jc["customer_id"], items=items, vat_rate=jc.get("vat_rate", 0.15))
+    inv_id = create_document("invoice", inv)
+    db.jobcard.update_one({"_id": jc["_id"]}, {"$set": {"status": "ready"}})
+    return {"invoice_id": inv_id}
+
+
+@app.get("/api/invoices")
+def list_invoices(status: Optional[str] = None):
+    filt = {"status": status} if status else {}
+    docs = list(db.invoice.find(filt).sort("_id", -1).limit(200))
+    # compute totals
+    out = []
+    for d in docs:
+        subtotal = 0.0
+        for it in d.get("items", []):
+            subtotal += float(it.get("unit_price", 0)) * int(it.get("quantity", 1)) - float(it.get("discount", 0))
+        vat = round(subtotal * float(d.get("vat_rate", 0.15)), 2)
+        total = round(subtotal + vat, 2)
+        dd = with_id(d)
+        dd["subtotal"] = round(subtotal, 2)
+        dd["vat"] = vat
+        dd["total"] = total
+        out.append(dd)
+    return out
+
+
+class PayInvoice(BaseModel):
+    cashier_id: Optional[str] = None
+    method: Optional[str] = None
+
+
+@app.post("/api/invoices/{inv_id}/pay")
+def pay_invoice(inv_id: str, body: PayInvoice):
+    res = db.invoice.update_one({"_id": oid(inv_id)}, {"$set": {"status": "paid", "cashier_id": body.cashier_id, "paid_at": datetime.utcnow(), "method": body.method}})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    return {"success": True}
+
+
+# --------------------------- Reports (basic) ---------------------------
+@app.get("/api/reports/summary")
+def summary_report():
+    return {
+        "vehicles": db.vehicle.count_documents({}),
+        "parts": db.part.count_documents({}),
+        "jobcards_open": db.jobcard.count_documents({"status": {"$in": ["open", "in_progress", "waiting_parts"]}}),
+        "invoices_pending": db.invoice.count_documents({"status": "pending"}),
+        "invoices_paid": db.invoice.count_documents({"status": "paid"}),
+    }
 
 
 if __name__ == "__main__":
