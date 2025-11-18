@@ -1,19 +1,19 @@
 INFO:     Will watch for changes in these directories: ['/home/workspace']
 INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
-INFO:     Started reloader process [548] using StatReload
-INFO:     Started server process [550]
+INFO:     Started reloader process [598] using StatReload
+INFO:     Started server process [600]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
-INFO:     172.20.0.1:50696 - "GET /api/invoices?status=pending HTTP/1.1" 200 OK
-INFO:     172.20.0.1:50696 - "GET /api/invoices?status=pending HTTP/1.1" 200 OK
-INFO:     172.20.0.1:50682 - "GET /api/reports/summary HTTP/1.1" 200 OK
-INFO:     172.20.0.1:50698 - "GET /api/technicians?only_available=true HTTP/1.1" 200 OK
-INFO:     172.20.0.1:50682 - "GET /api/technicians?only_available=true HTTP/1.1" 200 OK
-INFO:     172.20.0.1:50696 - "GET /api/reports/summary HTTP/1.1" 200 OK
-INFO:     172.20.0.1:56426 - "HEAD / HTTP/1.1" 405 Method Not Allowed
-INFO:     172.20.0.1:58402 - "GET /api/technicians?only_available=true HTTP/1.1" 200 OK
-INFO:     172.20.0.1:58408 - "GET /api/invoices?status=pending HTTP/1.1" 200 OK
-INFO:     172.20.0.1:50712 - "GET /api/reports/summary HTTP/1.1" 200 OK
-INFO:     172.20.0.1:58402 - "GET /api/technicians?only_available=true HTTP/1.1" 200 OK
-INFO:     172.20.0.1:58408 - "GET /api/invoices?status=pending HTTP/1.1" 200 OK
-INFO:     172.20.0.1:50712 - "GET /api/reports/summary HTTP/1.1" 200 OK
+INFO:     172.20.0.1:52936 - "HEAD / HTTP/1.1" 405 Method Not Allowed
+INFO:     172.20.0.1:52950 - "GET /api/technicians?only_available=true HTTP/1.1" 200 OK
+INFO:     172.20.0.1:52950 - "GET /api/technicians?only_available=true HTTP/1.1" 200 OK
+INFO:     172.20.0.1:52940 - "GET /api/reports/summary HTTP/1.1" 200 OK
+INFO:     172.20.0.1:52956 - "GET /api/invoices?status=pending HTTP/1.1" 200 OK
+INFO:     172.20.0.1:52940 - "GET /api/invoices?status=pending HTTP/1.1" 200 OK
+INFO:     172.20.0.1:52950 - "GET /api/reports/summary HTTP/1.1" 200 OK
+INFO:     172.20.0.1:37944 - "GET /api/technicians?only_available=true HTTP/1.1" 200 OK
+INFO:     172.20.0.1:37948 - "GET /api/invoices?status=pending HTTP/1.1" 200 OK
+INFO:     172.20.0.1:52962 - "GET /api/reports/summary HTTP/1.1" 200 OK
+INFO:     172.20.0.1:37948 - "GET /api/invoices?status=pending HTTP/1.1" 200 OK
+INFO:     172.20.0.1:37944 - "GET /api/technicians?only_available=true HTTP/1.1" 200 OK
+INFO:     172.20.0.1:52962 - "GET /api/reports/summary HTTP/1.1" 200 OK
