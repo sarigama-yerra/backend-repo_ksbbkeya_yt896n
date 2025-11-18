@@ -336,7 +336,7 @@ def update_parts_request(req_id: str, body: PartsRequestStatus):
     if body.status == "supplied":
         # deduct inventory
         for item in pr.get("items", []):
-            db.part.update_one({"_id": oid(item["part_id"])}, {"$inc": {"stock": -int(item.get("quantity", 1))}})
+            db.part.update_one({"_id": oid(item["part_id"] )}, {"$inc": {"stock": -int(item.get("quantity", 1))}})
         db.jobcard.update_one({"_id": oid(pr["job_card_id"])}, {"$set": {"status": "in_progress"}})
     return {"success": True}
 
@@ -352,7 +352,20 @@ def create_technician(t: Technician):
 def list_technicians(only_available: bool = Query(False)):
     filt = {"is_available": True} if only_available else {}
     docs = list(db.technician.find(filt))
-    return [with_id(d) for d in docs]
+    out = []
+    for d in docs:
+        tech_id_str = str(d.get("_id"))
+        cap = int(d.get("capacity", 3))
+        open_jobs = db.jobcard.count_documents({
+            "status": {"$in": ["open", "in_progress", "waiting_parts"]},
+            "technician_ids": {"$in": [tech_id_str]}
+        })
+        dd = with_id(d)
+        dd["open_jobs"] = open_jobs
+        dd["capacity"] = cap
+        dd["remaining_capacity"] = max(cap - open_jobs, 0)
+        out.append(dd)
+    return out
 
 
 # --------------------------- Sales: Quotations & Invoices ---------------------------
